@@ -80,6 +80,131 @@ class SeededRandom {
   }
 }
 
+/**
+ * Perlin noise implementation for smooth musical transitions
+ * Based on PROCJAM principles: "walk, don't jump"
+ */
+class PerlinNoise {
+  private permutation: number[];
+  
+  constructor(seed: number) {
+    const random = new SeededRandom(seed);
+    this.permutation = [];
+    
+    // Generate permutation table
+    for (let i = 0; i < 256; i++) {
+      this.permutation[i] = i;
+    }
+    
+    // Shuffle using seeded random
+    for (let i = 255; i > 0; i--) {
+      const j = random.nextInt(0, i);
+      [this.permutation[i], this.permutation[j]] = [this.permutation[j], this.permutation[i]];
+    }
+    
+    // Extend to 512 for wrapping
+    for (let i = 0; i < 256; i++) {
+      this.permutation[256 + i] = this.permutation[i];
+    }
+  }
+
+  private fade(t: number): number {
+    return t * t * t * (t * (t * 6 - 15) + 10);
+  }
+
+  private lerp(a: number, b: number, t: number): number {
+    return a + t * (b - a);
+  }
+
+  private grad(hash: number, x: number): number {
+    const h = hash & 15;
+    const grad = 1 + (h & 7);
+    return (h & 8 ? -grad : grad) * x;
+  }
+
+  /**
+   * Generate 1D Perlin noise value between -1 and 1
+   */
+  noise(x: number): number {
+    const X = Math.floor(x) & 255;
+    x -= Math.floor(x);
+    
+    const u = this.fade(x);
+    
+    const a = this.permutation[X];
+    const b = this.permutation[X + 1];
+    
+    return this.lerp(
+      this.grad(a, x),
+      this.grad(b, x - 1),
+      u
+    );
+  }
+
+  /**
+   * Get smoothed value between 0 and 1
+   */
+  smoothValue(x: number): number {
+    return (this.noise(x) + 1) * 0.5;
+  }
+}
+
+/**
+ * Musical phrase generator following "dungeon room" concept
+ */
+interface MusicalPhrase {
+  notes: number[];
+  duration: number;
+  intensity: number;
+  type: 'intro' | 'verse' | 'chorus' | 'bridge' | 'outro' | 'transition';
+  repeatCount: number;
+}
+
+/**
+ * Crossfade manager for smooth transitions between musical sections
+ */
+class CrossfadeManager {
+  private currentGain: GainNode | null = null;
+  private nextGain: GainNode | null = null;
+  private audioContext: AudioContext;
+
+  constructor(audioContext: AudioContext) {
+    this.audioContext = audioContext;
+  }
+
+  /**
+   * Start crossfade transition between two audio sources
+   */
+  crossfade(
+    currentSource: AudioBufferSourceNode | null,
+    nextSource: AudioBufferSourceNode,
+    duration: number = 2.0
+  ): GainNode {
+    const now = this.audioContext.currentTime;
+    
+    // Create gain nodes for crossfading
+    this.nextGain = this.audioContext.createGain();
+    this.nextGain.gain.setValueAtTime(0, now);
+    this.nextGain.gain.linearRampToValueAtTime(1, now + duration);
+    
+    nextSource.connect(this.nextGain);
+    this.nextGain.connect(this.audioContext.destination);
+    
+    // Fade out current source if it exists
+    if (currentSource && this.currentGain) {
+      this.currentGain.gain.linearRampToValueAtTime(0, now + duration);
+      setTimeout(() => {
+        if (currentSource) {
+          currentSource.stop();
+        }
+      }, duration * 1000);
+    }
+    
+    this.currentGain = this.nextGain;
+    return this.nextGain;
+  }
+}
+
 // Enhanced music theory constants for multiple scales and moods
 const MUSICAL_SCALES = {
   E_MINOR: {
@@ -498,6 +623,10 @@ export class AudioSystem {
   private currentSongConfig: ProceduralSongConfig | null = null;
   private lastMusicUpdate: number = 0;
   private seededRandom: SeededRandom | null = null;
+  private perlinNoise: PerlinNoise | null = null;
+  private crossfadeManager: CrossfadeManager | null = null;
+  private currentPhrase: MusicalPhrase | null = null;
+  private musicTime: number = 0; // Continuous time for Perlin noise sampling
   private listeners: Array<(settings: AudioSettings) => void> = [];
 
   constructor() {
@@ -2340,7 +2469,162 @@ export class AudioSystem {
     };
 
     this.seededRandom = new SeededRandom(seed);
-    this.generateProceduralSong(this.currentSongConfig, gameState);
+    this.perlinNoise = new PerlinNoise(seed);
+    
+    // Initialize crossfade manager if not exists
+    if (!this.crossfadeManager) {
+      this.crossfadeManager = new CrossfadeManager(this.audioContext);
+    }
+
+    this.generateSmoothProceduralMusic(this.currentSongConfig, gameState);
+  }
+
+  /**
+   * Generate musical phrases following PROCJAM "dungeon room" concept
+   */
+  private generateMusicalPhrase(
+    type: MusicalPhrase['type'],
+    intensity: number,
+    scale: any,
+    beatDuration: number
+  ): MusicalPhrase {
+    if (!this.seededRandom || !this.perlinNoise) {
+      throw new Error("Random generators not initialized");
+    }
+
+    const phraseLength = type === 'intro' || type === 'outro' ? 4 : 8; // Bars
+    const notes: number[] = [];
+    
+    // Create scale note array for easier access
+    const scaleNotes = [
+      scale.E3, scale.G3, scale.A3, scale.B3, 
+      scale.C4, scale.D4, scale.E4, scale.G4, scale.A4
+    ].filter(note => note !== undefined);
+
+    let lastNoteIndex = Math.floor(scaleNotes.length / 2); // Start in middle
+
+    // Generate notes using Perlin noise for smooth transitions
+    for (let i = 0; i < phraseLength * 4; i++) { // 4 beats per bar
+      const noiseValue = this.perlinNoise.smoothValue(this.musicTime + i * 0.1);
+      
+      // Use Perlin noise to determine if we should play a note (breathing room)
+      const shouldPlayNote = noiseValue > (0.5 - intensity * 0.2); // More notes at higher intensity
+      
+      if (shouldPlayNote) {
+        // Small interval movement based on Perlin noise
+        const direction = this.perlinNoise.noise(this.musicTime + i * 0.05);
+        const stepSize = Math.floor(direction * 3); // -3 to +3 step size
+        
+        lastNoteIndex = Math.max(0, Math.min(scaleNotes.length - 1, 
+          lastNoteIndex + stepSize));
+        
+        notes.push(scaleNotes[lastNoteIndex]);
+      } else {
+        notes.push(0); // Rest/silence
+      }
+    }
+
+    // Determine repeat count based on phrase type (PROCJAM: repeat 4-8 times)
+    const repeatCount = type === 'chorus' ? 4 : type === 'verse' ? 3 : 2;
+
+    return {
+      notes,
+      duration: phraseLength * beatDuration * 4, // 4 beats per bar
+      intensity,
+      type,
+      repeatCount
+    };
+  }
+
+  /**
+   * Generate smooth procedural music with crossfading transitions
+   */
+  private generateSmoothProceduralMusic(
+    config: ProceduralSongConfig, 
+    gameState: GameStateForMusic
+  ): void {
+    if (!this.audioContext || !this.seededRandom || !this.crossfadeManager) return;
+
+    const songType = SONG_TYPES[config.songType];
+    const scale = MUSICAL_SCALES[songType.scale as keyof typeof MUSICAL_SCALES];
+    
+    // Calculate adaptive BPM
+    const adaptiveBpm = this.calculateAdaptiveBpm(songType.baseBpm, gameState, config);
+    const beatDuration = 60 / adaptiveBpm;
+
+    // Generate current musical phrase
+    this.currentPhrase = this.generateMusicalPhrase(
+      this.determineCurrentPhraseType(gameState),
+      config.intensity,
+      scale,
+      beatDuration
+    );
+
+    // Create audio buffer for the phrase
+    const buffer = this.generatePhraseBuffer(this.currentPhrase, scale, beatDuration, config, gameState);
+    
+    if (buffer) {
+      // Create source and start crossfade
+      const source = this.audioContext.createBufferSource();
+      source.buffer = buffer;
+      source.loop = true;
+      
+      // Crossfade to new phrase
+      const gainNode = this.crossfadeManager.crossfade(this.ambientSource, source, 1.5);
+      
+      source.start();
+      this.ambientSource = source;
+      
+      // Apply final volume settings
+      const finalVolume = this.settings.musicVolume * this.settings.masterVolume;
+      gainNode.gain.setTargetAtTime(finalVolume, this.audioContext.currentTime + 1.5, 0.1);
+    }
+
+    // Advance music time for Perlin noise continuity
+    this.musicTime += this.currentPhrase.duration;
+  }
+
+  /**
+   * Determine what type of phrase to generate based on game state
+   */
+  private determineCurrentPhraseType(gameState: GameStateForMusic): MusicalPhrase['type'] {
+    const healthRatio = gameState.playerHealth / gameState.playerMaxHealth;
+    
+    if (gameState.nearbyEnemyCount > 2) return 'chorus'; // High intensity
+    if (gameState.isInCombat) return 'verse'; // Medium intensity
+    if (healthRatio < 0.3) return 'bridge'; // Tension building
+    if (gameState.enemyCount === 0) return 'outro'; // Victory approaching
+    
+    return 'verse'; // Default exploration
+  }
+
+  /**
+   * Generate audio buffer for a musical phrase
+   */
+  private generatePhraseBuffer(
+    phrase: MusicalPhrase,
+    scale: any,
+    beatDuration: number,
+    config: ProceduralSongConfig,
+    gameState: GameStateForMusic
+  ): AudioBuffer | null {
+    if (!this.audioContext) return null;
+
+    const buffer = this.audioContext.createBuffer(
+      2, 
+      Math.ceil(phrase.duration * this.audioContext.sampleRate), 
+      this.audioContext.sampleRate
+    );
+    
+    const leftChannel = buffer.getChannelData(0);
+    const rightChannel = buffer.getChannelData(1);
+
+    // Generate phrase with proper repetition and breathing
+    this.generateSmoothMelody(leftChannel, rightChannel, phrase, scale, beatDuration, config, gameState);
+    this.generateSmoothBass(leftChannel, rightChannel, phrase, scale, beatDuration, config);
+    this.generateSmoothRhythm(leftChannel, rightChannel, phrase, beatDuration, config);
+
+    return buffer;
   }
 
   /**
@@ -2381,93 +2665,7 @@ export class AudioSystem {
     return baseLength;
   }
 
-  /**
-   * Generate a complete procedural song based on configuration
-   */
-  private generateProceduralSong(
-    config: ProceduralSongConfig,
-    gameState: GameStateForMusic
-  ): void {
-    if (!this.audioContext || !this.seededRandom) return;
 
-    // Stop current music
-    this.stopAmbientMusic();
-
-    const songType = SONG_TYPES[config.songType];
-    const scale = MUSICAL_SCALES[songType.scale as keyof typeof MUSICAL_SCALES];
-
-    // Calculate adaptive BPM
-    const adaptiveBpm = this.calculateAdaptiveBpm(
-      songType.baseBpm,
-      gameState,
-      config
-    );
-    const beatDuration = 60 / adaptiveBpm;
-    const measureDuration = beatDuration * 4;
-
-    // Generate song structure based on type
-    const songStructure = this.generateSongStructure(config, songType);
-    const totalDuration =
-      Object.values(songStructure).reduce(
-        (sum, measures) => sum + measures,
-        0
-      ) * measureDuration;
-
-    // Create audio buffer for the complete song
-    const buffer = this.audioContext.createBuffer(
-      2,
-      Math.ceil(totalDuration * this.audioContext.sampleRate),
-      this.audioContext.sampleRate
-    );
-    const leftChannel = buffer.getChannelData(0);
-    const rightChannel = buffer.getChannelData(1);
-
-    // Generate musical elements
-    this.generateAdaptiveRhythm(
-      leftChannel,
-      rightChannel,
-      songStructure,
-      scale,
-      beatDuration,
-      config,
-      gameState
-    );
-    this.generateAdaptiveMelody(
-      leftChannel,
-      rightChannel,
-      songStructure,
-      scale,
-      beatDuration,
-      config,
-      gameState
-    );
-    this.generateAdaptiveBass(
-      leftChannel,
-      rightChannel,
-      songStructure,
-      scale,
-      beatDuration,
-      config,
-      gameState
-    );
-
-    if (
-      config.adaptiveFeatures.proximityDissonance &&
-      gameState.nearbyEnemyCount > 0
-    ) {
-      this.generateProximityDissonance(
-        leftChannel,
-        rightChannel,
-        songStructure,
-        scale,
-        beatDuration,
-        gameState
-      );
-    }
-
-    // Play the generated song
-    this.playGeneratedSong(buffer);
-  }
 
   /**
    * Calculate adaptive BPM based on game state
@@ -2905,6 +3103,161 @@ export class AudioSystem {
   }
 
   /**
+   * Generate smooth melody using Perlin noise for natural flow
+   */
+  private generateSmoothMelody(
+    leftChannel: Float32Array,
+    rightChannel: Float32Array,
+    phrase: MusicalPhrase,
+    _scale: any,
+    beatDuration: number,
+    config: ProceduralSongConfig,
+    _gameState: GameStateForMusic
+  ): void {
+    if (!this.perlinNoise) return;
+
+    const notesPerBeat = 2; // Eighth notes
+    const totalNotes = phrase.notes.length;
+    
+    for (let i = 0; i < totalNotes; i++) {
+      const noteFrequency = phrase.notes[i];
+      if (noteFrequency === 0) continue; // Skip rests
+      
+      const noteTime = (i / notesPerBeat) * beatDuration;
+      const noteDuration = beatDuration / notesPerBeat * 0.8; // Slight gap between notes
+      
+      // Add slight frequency variation using Perlin noise for humanization
+      const variation = this.perlinNoise.noise(this.musicTime + i * 0.02) * 5; // ±5Hz variation
+      const finalFrequency = noteFrequency + variation;
+      
+      // Generate note with envelope
+      const noteBuffer = this.generateNote(
+        finalFrequency,
+        noteDuration,
+        "sawtooth",
+        { attack: 0.05, decay: 0.1, sustain: 0.6, release: 0.25 },
+        config.intensity * VOLUME_MULTIPLIERS.LEAD * 0.3,
+        { type: "lowpass", frequency: 1200 + config.intensity * 800 }
+      );
+      
+      if (noteBuffer) {
+        // Add stereo width using Perlin noise
+        const stereoPosition = this.perlinNoise.smoothValue(this.musicTime + i * 0.1) * 2 - 1; // -1 to 1
+        const leftGain = stereoPosition < 0 ? 1 : 1 - Math.abs(stereoPosition);
+        const rightGain = stereoPosition > 0 ? 1 : 1 - Math.abs(stereoPosition);
+        
+        this.mixAudioBufferWithGain(leftChannel, noteBuffer, noteTime, leftGain);
+        this.mixAudioBufferWithGain(rightChannel, noteBuffer, noteTime, rightGain);
+      }
+    }
+  }
+
+  /**
+   * Generate smooth bass line with consistent foundation
+   */
+  private generateSmoothBass(
+    leftChannel: Float32Array,
+    rightChannel: Float32Array,
+    phrase: MusicalPhrase,
+    scale: any,
+    beatDuration: number,
+    config: ProceduralSongConfig
+  ): void {
+    if (!this.perlinNoise) return;
+
+    const bassNotes = [scale.E1, scale.G1, scale.A1, scale.B1].filter(note => note !== undefined);
+    const beatsInPhrase = phrase.notes.length / 2; // Assuming 2 notes per beat
+    
+    for (let beat = 0; beat < beatsInPhrase; beat++) {
+      // Play bass on strong beats (1 and 3 in 4/4 time)
+      if (beat % 4 === 0 || beat % 4 === 2) {
+        const beatTime = beat * beatDuration;
+        
+        // Choose bass note using Perlin noise for smooth progression
+        const noiseValue = this.perlinNoise.smoothValue(this.musicTime + beat * 0.25);
+        const bassNoteIndex = Math.floor(noiseValue * bassNotes.length);
+        const bassFrequency = bassNotes[bassNoteIndex];
+        
+        const bassBuffer = this.generateNote(
+          bassFrequency,
+          beatDuration * 1.5, // Slightly longer than beat
+          "triangle",
+          { attack: 0.01, decay: 0.3, sustain: 0.5, release: 0.4 },
+          config.intensity * VOLUME_MULTIPLIERS.BASS * 0.5,
+          { type: "lowpass", frequency: 150 }
+        );
+        
+        if (bassBuffer) {
+          this.mixAudioBuffer(leftChannel, bassBuffer, beatTime);
+          this.mixAudioBuffer(rightChannel, bassBuffer, beatTime);
+        }
+      }
+    }
+  }
+
+  /**
+   * Generate smooth rhythm section with breathing room
+   */
+  private generateSmoothRhythm(
+    leftChannel: Float32Array,
+    rightChannel: Float32Array,
+    phrase: MusicalPhrase,
+    beatDuration: number,
+    config: ProceduralSongConfig
+  ): void {
+    if (!this.perlinNoise) return;
+
+    const beatsInPhrase = phrase.notes.length / 2;
+    
+    for (let beat = 0; beat < beatsInPhrase; beat++) {
+      const beatTime = beat * beatDuration;
+      
+      // Kick drum on beats 1 and 3, with some variation
+      if (beat % 4 === 0 || (beat % 4 === 2 && this.perlinNoise.smoothValue(this.musicTime + beat * 0.1) > 0.3)) {
+        const kickIntensity = 1.0 - (this.perlinNoise.smoothValue(this.musicTime + beat * 0.05) * 0.3);
+        
+        const kickBuffer = this.generateNote(
+          60, // Low kick frequency
+          beatDuration * 0.4,
+          "sine",
+          { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.1 },
+          kickIntensity * config.intensity * VOLUME_MULTIPLIERS.KICK * 0.6,
+          { type: "lowpass", frequency: 100 }
+        );
+        
+        if (kickBuffer) {
+          this.mixAudioBuffer(leftChannel, kickBuffer, beatTime);
+          this.mixAudioBuffer(rightChannel, kickBuffer, beatTime);
+        }
+      }
+      
+      // Hi-hat pattern with Perlin noise variation
+      if (beat % 2 === 1) { // Offbeats
+        const hihatChance = this.perlinNoise.smoothValue(this.musicTime + beat * 0.15);
+        if (hihatChance > 0.4) { // 60% chance to play
+          const hihatBuffer = this.generateNote(
+            8000 + this.perlinNoise.noise(this.musicTime + beat * 0.1) * 2000, // High frequency variation
+            beatDuration * 0.1,
+            "square",
+            { attack: 0.001, decay: 0.05, sustain: 0.1, release: 0.05 },
+            config.intensity * 0.2,
+            { type: "highpass", frequency: 5000 }
+          );
+          
+          if (hihatBuffer) {
+            // Alternate stereo placement
+            if (beat % 4 === 1) {
+              this.mixAudioBuffer(leftChannel, hihatBuffer, beatTime);
+            } else {
+              this.mixAudioBuffer(rightChannel, hihatBuffer, beatTime);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Cleanup resources
    */
   public cleanup(): void {
@@ -2923,5 +3276,7 @@ export class AudioSystem {
     // Don't close the global audio context as other instances might be using it
     this.audioContext = null;
     this.musicGainNode = null;
+    this.crossfadeManager = null;
+    this.perlinNoise = null;
   }
 }
