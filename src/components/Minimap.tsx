@@ -48,12 +48,57 @@ export default function Minimap({
       );
   });
 
+  // Update discovered map when world map dimensions change
+  useEffect(() => {
+    if (!worldMap || worldMap.length === 0 || !worldMap[0]) {
+      setDiscoveredMap([]);
+      return;
+    }
+
+    // Check if discovered map needs to be resized
+    const needsResize = 
+      discoveredMap.length !== worldMap.length ||
+      (discoveredMap.length > 0 && discoveredMap[0].length !== worldMap[0].length);
+
+    if (needsResize) {
+      const newDiscoveredMap = Array(worldMap.length)
+        .fill(null)
+        .map((_, y) =>
+          Array(worldMap[0].length)
+            .fill(null)
+            .map((_, x) => {
+              // Preserve existing discovered state if within bounds
+              if (
+                discoveredMap[y] &&
+                discoveredMap[y][x] !== undefined
+              ) {
+                return discoveredMap[y][x];
+              }
+              return {
+                discovered: false,
+                lastSeen: 0,
+              };
+            })
+        );
+      setDiscoveredMap(newDiscoveredMap);
+    }
+  }, [worldMap]);
+
   // Update discovered areas based on player's field of view
   useEffect(() => {
     const updateDiscoveredAreas = () => {
       if (!discoveredMap || discoveredMap.length === 0) {
         return;
       }
+      
+      // Ensure discovered map matches world map dimensions
+      if (
+        discoveredMap.length !== worldMap.length ||
+        (discoveredMap.length > 0 && discoveredMap[0].length !== worldMap[0].length)
+      ) {
+        return; // Skip update if dimensions don't match, useEffect above will fix it
+      }
+      
       const newDiscoveredMap = discoveredMap.map((row) => [...row]);
       const currentTime = Date.now();
 
@@ -117,7 +162,9 @@ export default function Minimap({
             mapX >= 0 &&
             mapX < worldMap[0].length &&
             mapY >= 0 &&
-            mapY < worldMap.length
+            mapY < worldMap.length &&
+            newDiscoveredMap[mapY] &&
+            newDiscoveredMap[mapY][mapX] !== undefined
           ) {
             newDiscoveredMap[mapY][mapX] = {
               discovered: true,
