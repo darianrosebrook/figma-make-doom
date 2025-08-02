@@ -1639,7 +1639,7 @@ export class GameStateManager {
     if (this.state.gameStatus !== "playing" || this.state.isPaused) return;
 
     const moveSpeed = 0.15; // Increased from 0.05 for faster movement
-    const rotationSpeed = 0.03; // Increased from 0.03 for faster rotation
+    const rotationSpeed = 0.01; // Increased from 0.03 for faster rotation
 
     let newX = this.state.player.x;
     let newY = this.state.player.y;
@@ -1689,7 +1689,7 @@ export class GameStateManager {
   public updateMouseLook(deltaX: number): void {
     if (this.state.gameStatus !== "playing" || this.state.isPaused) return;
 
-    const rotationSpeed = 0.005; // Increased from 0.002 for better mouse sensitivity
+    const rotationSpeed = 0.002; // Increased from 0.002 for better mouse sensitivity
     this.state.player.angle += deltaX * rotationSpeed;
     this.notifyListeners();
   }

@@ -86,22 +86,25 @@ class SeededRandom {
  */
 class PerlinNoise {
   private permutation: number[];
-  
+
   constructor(seed: number) {
     const random = new SeededRandom(seed);
     this.permutation = [];
-    
+
     // Generate permutation table
     for (let i = 0; i < 256; i++) {
       this.permutation[i] = i;
     }
-    
+
     // Shuffle using seeded random
     for (let i = 255; i > 0; i--) {
       const j = random.nextInt(0, i);
-      [this.permutation[i], this.permutation[j]] = [this.permutation[j], this.permutation[i]];
+      [this.permutation[i], this.permutation[j]] = [
+        this.permutation[j],
+        this.permutation[i],
+      ];
     }
-    
+
     // Extend to 512 for wrapping
     for (let i = 0; i < 256; i++) {
       this.permutation[256 + i] = this.permutation[i];
@@ -128,17 +131,13 @@ class PerlinNoise {
   noise(x: number): number {
     const X = Math.floor(x) & 255;
     x -= Math.floor(x);
-    
+
     const u = this.fade(x);
-    
+
     const a = this.permutation[X];
     const b = this.permutation[X + 1];
-    
-    return this.lerp(
-      this.grad(a, x),
-      this.grad(b, x - 1),
-      u
-    );
+
+    return this.lerp(this.grad(a, x), this.grad(b, x - 1), u);
   }
 
   /**
@@ -156,7 +155,7 @@ interface MusicalPhrase {
   notes: number[];
   duration: number;
   intensity: number;
-  type: 'intro' | 'verse' | 'chorus' | 'bridge' | 'outro' | 'transition';
+  type: "intro" | "verse" | "chorus" | "bridge" | "outro" | "transition";
   repeatCount: number;
 }
 
@@ -181,15 +180,15 @@ class CrossfadeManager {
     duration: number = 2.0
   ): GainNode {
     const now = this.audioContext.currentTime;
-    
+
     // Create gain nodes for crossfading
     this.nextGain = this.audioContext.createGain();
     this.nextGain.gain.setValueAtTime(0, now);
     this.nextGain.gain.linearRampToValueAtTime(1, now + duration);
-    
+
     nextSource.connect(this.nextGain);
     this.nextGain.connect(this.audioContext.destination);
-    
+
     // Fade out current source if it exists
     if (currentSource && this.currentGain) {
       this.currentGain.gain.linearRampToValueAtTime(0, now + duration);
@@ -199,7 +198,7 @@ class CrossfadeManager {
         }
       }, duration * 1000);
     }
-    
+
     this.currentGain = this.nextGain;
     return this.nextGain;
   }
@@ -357,6 +356,32 @@ const MUSICAL_SCALES = {
 
 // Legacy alias for backward compatibility
 const E_MINOR_SCALE = MUSICAL_SCALES.E_MINOR;
+
+/**
+ * Scale note arrays for ensuring harmonic accuracy
+ */
+const SCALE_NOTE_ARRAYS = {
+  E_MINOR: {
+    bass: [41.2, 49.0, 55.0, 61.74, 65.41, 73.42], // E1, G1, A1, B1, C2, D2
+    melody: [164.81, 196.0, 220.0, 246.94, 261.63, 293.66, 329.63, 392.0, 440.0], // E3-A4
+    harmony: [82.41, 98.0, 110.0, 123.47, 130.81, 146.83] // E2-D3
+  },
+  C_MAJOR: {
+    bass: [32.7, 36.71, 43.65, 49.0, 55.0, 61.74], // C1, D1, F1, G1, A1, B1
+    melody: [130.81, 146.83, 164.81, 174.61, 196.0, 220.0, 246.94, 261.63, 293.66], // C3-D4
+    harmony: [65.41, 73.42, 82.41, 87.31, 98.0, 110.0] // C2-A2
+  },
+  A_HARMONIC_MINOR: {
+    bass: [55.0, 61.74, 65.41, 73.42, 82.41, 87.31], // A1, B1, C2, D2, E2, F2
+    melody: [220.0, 246.94, 261.63, 293.66, 329.63, 349.23, 415.3, 440.0], // A3-A4
+    harmony: [110.0, 123.47, 130.81, 146.83, 164.81, 174.61] // A2-F3
+  },
+  D_DORIAN: {
+    bass: [36.71, 41.2, 43.65, 49.0, 55.0, 61.74], // D1, E1, F1, G1, A1, B1
+    melody: [146.83, 164.81, 174.61, 196.0, 220.0, 246.94, 261.63, 293.66], // D3-D4
+    harmony: [73.42, 82.41, 87.31, 98.0, 110.0, 123.47] // D2-B2
+  }
+};
 
 // Central musical themes for cohesion
 const MUSICAL_THEMES = {
@@ -627,6 +652,11 @@ export class AudioSystem {
   private crossfadeManager: CrossfadeManager | null = null;
   private currentPhrase: MusicalPhrase | null = null;
   private musicTime: number = 0; // Continuous time for Perlin noise sampling
+  
+  // Continuous base layer
+  private baseLayerSource: AudioBufferSourceNode | null = null;
+  private baseLayerGain: GainNode | null = null;
+  private melodyLayerGain: GainNode | null = null;
   private listeners: Array<(settings: AudioSettings) => void> = [];
 
   constructor() {
@@ -2470,54 +2500,175 @@ export class AudioSystem {
 
     this.seededRandom = new SeededRandom(seed);
     this.perlinNoise = new PerlinNoise(seed);
-    
+
     // Initialize crossfade manager if not exists
     if (!this.crossfadeManager) {
       this.crossfadeManager = new CrossfadeManager(this.audioContext);
     }
 
+    // Ensure continuous base layer is running
+    this.ensureContinuousBaseLayer(this.currentSongConfig, gameState);
+
     this.generateSmoothProceduralMusic(this.currentSongConfig, gameState);
+  }
+
+  /**
+   * Ensure a continuous base layer is always playing
+   */
+  private ensureContinuousBaseLayer(
+    config: ProceduralSongConfig,
+    gameState: GameStateForMusic
+  ): void {
+    if (!this.audioContext) return;
+
+    // Create base layer gain node if needed
+    if (!this.baseLayerGain) {
+      this.baseLayerGain = this.audioContext.createGain();
+      this.baseLayerGain.gain.setValueAtTime(0.3, this.audioContext.currentTime);
+      this.baseLayerGain.connect(this.audioContext.destination);
+    }
+
+    // Create melody layer gain node if needed
+    if (!this.melodyLayerGain) {
+      this.melodyLayerGain = this.audioContext.createGain();
+      this.melodyLayerGain.gain.setValueAtTime(0.7, this.audioContext.currentTime);
+      this.melodyLayerGain.connect(this.audioContext.destination);
+    }
+
+    // Start base layer if not running
+    if (!this.baseLayerSource) {
+      const baseBuffer = this.generateContinuousBaseLayer(config, gameState);
+      if (baseBuffer) {
+        this.baseLayerSource = this.audioContext.createBufferSource();
+        this.baseLayerSource.buffer = baseBuffer;
+        this.baseLayerSource.loop = true;
+        this.baseLayerSource.connect(this.baseLayerGain);
+        this.baseLayerSource.start();
+      }
+    }
+
+    // Adjust base layer intensity based on game state
+    const targetVolume = 0.2 + config.intensity * 0.2; // 0.2 to 0.4
+    this.baseLayerGain.gain.setTargetAtTime(
+      targetVolume * this.settings.musicVolume * this.settings.masterVolume,
+      this.audioContext.currentTime,
+      0.5
+    );
+  }
+
+  /**
+   * Generate a continuous base layer that never stops
+   */
+  private generateContinuousBaseLayer(
+    config: ProceduralSongConfig,
+    gameState: GameStateForMusic
+  ): AudioBuffer | null {
+    if (!this.audioContext || !this.seededRandom) return null;
+
+    const songType = SONG_TYPES[config.songType];
+    const scaleKey = songType.scale as keyof typeof SCALE_NOTE_ARRAYS;
+    const scaleNotes = SCALE_NOTE_ARRAYS[scaleKey];
+    
+    const adaptiveBpm = this.calculateAdaptiveBpm(songType.baseBpm, gameState, config);
+    const beatDuration = 60 / adaptiveBpm;
+    const patternDuration = beatDuration * 16; // 4-bar pattern
+
+    const buffer = this.audioContext.createBuffer(
+      2,
+      Math.ceil(patternDuration * this.audioContext.sampleRate),
+      this.audioContext.sampleRate
+    );
+
+    const leftChannel = buffer.getChannelData(0);
+    const rightChannel = buffer.getChannelData(1);
+
+    // Generate simple, continuous bass pattern
+    for (let beat = 0; beat < 16; beat++) {
+      const beatTime = beat * beatDuration;
+      
+      // Play bass on strong beats (1, 5, 9, 13) and some weak beats
+      if (beat % 4 === 0 || (beat % 8 === 6 && config.intensity > 0.5)) {
+        const bassNoteIndex = Math.floor((beat / 4) % scaleNotes.bass.length);
+        const bassFrequency = scaleNotes.bass[bassNoteIndex];
+
+        const bassBuffer = this.generateNote(
+          bassFrequency,
+          beatDuration * 1.5,
+          "triangle",
+          { attack: 0.02, decay: 0.3, sustain: 0.4, release: 0.4 },
+          0.6,
+          { type: "lowpass", frequency: 120 }
+        );
+
+        if (bassBuffer) {
+          this.mixAudioBuffer(leftChannel, bassBuffer, beatTime);
+          this.mixAudioBuffer(rightChannel, bassBuffer, beatTime);
+        }
+      }
+
+      // Add subtle kick pattern
+      if (beat % 4 === 0) {
+        const kickBuffer = this.generateNote(
+          45, // Deep kick
+          beatDuration * 0.3,
+          "sine",
+          { attack: 0.01, decay: 0.2, sustain: 0.1, release: 0.1 },
+          0.4,
+          { type: "lowpass", frequency: 80 }
+        );
+
+        if (kickBuffer) {
+          this.mixAudioBuffer(leftChannel, kickBuffer, beatTime);
+          this.mixAudioBuffer(rightChannel, kickBuffer, beatTime);
+        }
+      }
+    }
+
+    return buffer;
   }
 
   /**
    * Generate musical phrases following PROCJAM "dungeon room" concept
    */
   private generateMusicalPhrase(
-    type: MusicalPhrase['type'],
+    type: MusicalPhrase["type"],
     intensity: number,
-    scale: any,
+    _scale: any,
     beatDuration: number
   ): MusicalPhrase {
     if (!this.seededRandom || !this.perlinNoise) {
       throw new Error("Random generators not initialized");
     }
 
-    const phraseLength = type === 'intro' || type === 'outro' ? 4 : 8; // Bars
+    const phraseLength = type === "intro" || type === "outro" ? 4 : 8; // Bars
     const notes: number[] = [];
-    
-    // Create scale note array for easier access
-    const scaleNotes = [
-      scale.E3, scale.G3, scale.A3, scale.B3, 
-      scale.C4, scale.D4, scale.E4, scale.G4, scale.A4
-    ].filter(note => note !== undefined);
+
+    // Use the properly organized scale notes for harmonic accuracy
+    const scaleKey = this.currentSongConfig?.baseKey as keyof typeof SCALE_NOTE_ARRAYS || 'E_MINOR';
+    const scaleNotes = SCALE_NOTE_ARRAYS[scaleKey]?.melody || [
+      164.81, 196.0, 220.0, 246.94, 261.63, 293.66, 329.63, 392.0, 440.0
+    ];
 
     let lastNoteIndex = Math.floor(scaleNotes.length / 2); // Start in middle
 
     // Generate notes using Perlin noise for smooth transitions
-    for (let i = 0; i < phraseLength * 4; i++) { // 4 beats per bar
+    for (let i = 0; i < phraseLength * 4; i++) {
+      // 4 beats per bar
       const noiseValue = this.perlinNoise.smoothValue(this.musicTime + i * 0.1);
-      
+
       // Use Perlin noise to determine if we should play a note (breathing room)
-      const shouldPlayNote = noiseValue > (0.5 - intensity * 0.2); // More notes at higher intensity
-      
+      const shouldPlayNote = noiseValue > 0.5 - intensity * 0.2; // More notes at higher intensity
+
       if (shouldPlayNote) {
-        // Small interval movement based on Perlin noise
+        // Smaller interval movement for better harmony (max 2 steps)
         const direction = this.perlinNoise.noise(this.musicTime + i * 0.05);
-        const stepSize = Math.floor(direction * 3); // -3 to +3 step size
-        
-        lastNoteIndex = Math.max(0, Math.min(scaleNotes.length - 1, 
-          lastNoteIndex + stepSize));
-        
+        const stepSize = Math.floor(direction * 2); // -2 to +2 step size (reduced from 3)
+
+        lastNoteIndex = Math.max(
+          0,
+          Math.min(scaleNotes.length - 1, lastNoteIndex + stepSize)
+        );
+
         notes.push(scaleNotes[lastNoteIndex]);
       } else {
         notes.push(0); // Rest/silence
@@ -2525,14 +2676,14 @@ export class AudioSystem {
     }
 
     // Determine repeat count based on phrase type (PROCJAM: repeat 4-8 times)
-    const repeatCount = type === 'chorus' ? 4 : type === 'verse' ? 3 : 2;
+    const repeatCount = type === "chorus" ? 4 : type === "verse" ? 3 : 2;
 
     return {
       notes,
       duration: phraseLength * beatDuration * 4, // 4 beats per bar
       intensity,
       type,
-      repeatCount
+      repeatCount,
     };
   }
 
@@ -2540,16 +2691,21 @@ export class AudioSystem {
    * Generate smooth procedural music with crossfading transitions
    */
   private generateSmoothProceduralMusic(
-    config: ProceduralSongConfig, 
+    config: ProceduralSongConfig,
     gameState: GameStateForMusic
   ): void {
-    if (!this.audioContext || !this.seededRandom || !this.crossfadeManager) return;
+    if (!this.audioContext || !this.seededRandom || !this.crossfadeManager)
+      return;
 
     const songType = SONG_TYPES[config.songType];
     const scale = MUSICAL_SCALES[songType.scale as keyof typeof MUSICAL_SCALES];
-    
+
     // Calculate adaptive BPM
-    const adaptiveBpm = this.calculateAdaptiveBpm(songType.baseBpm, gameState, config);
+    const adaptiveBpm = this.calculateAdaptiveBpm(
+      songType.baseBpm,
+      gameState,
+      config
+    );
     const beatDuration = 60 / adaptiveBpm;
 
     // Generate current musical phrase
@@ -2561,23 +2717,49 @@ export class AudioSystem {
     );
 
     // Create audio buffer for the phrase
-    const buffer = this.generatePhraseBuffer(this.currentPhrase, scale, beatDuration, config, gameState);
-    
+    const buffer = this.generatePhraseBuffer(
+      this.currentPhrase,
+      scale,
+      beatDuration,
+      config,
+      gameState
+    );
+
     if (buffer) {
       // Create source and start crossfade
       const source = this.audioContext.createBufferSource();
       source.buffer = buffer;
       source.loop = true;
-      
-      // Crossfade to new phrase
-      const gainNode = this.crossfadeManager.crossfade(this.ambientSource, source, 1.5);
-      
+
+      // Connect to melody layer instead of directly to destination
+      source.connect(this.melodyLayerGain!);
       source.start();
+
+      // Smoothly transition melody layer volume
+      if (this.ambientSource) {
+        // Fade out old source
+        this.melodyLayerGain!.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.5);
+        setTimeout(() => {
+          if (this.ambientSource) {
+            this.ambientSource.stop();
+          }
+          // Fade in new source
+          this.melodyLayerGain?.gain.setTargetAtTime(
+            0.7 * this.settings.musicVolume * this.settings.masterVolume,
+            this.audioContext.currentTime,
+            0.5
+          );
+        }, 500);
+      } else {
+        // First time, just fade in
+        this.melodyLayerGain!.gain.setTargetAtTime(
+          0.7 * this.settings.musicVolume * this.settings.masterVolume,
+          this.audioContext.currentTime,
+          0.5
+        );
+      }
+
       this.ambientSource = source;
-      
-      // Apply final volume settings
-      const finalVolume = this.settings.musicVolume * this.settings.masterVolume;
-      gainNode.gain.setTargetAtTime(finalVolume, this.audioContext.currentTime + 1.5, 0.1);
     }
 
     // Advance music time for Perlin noise continuity
@@ -2587,15 +2769,17 @@ export class AudioSystem {
   /**
    * Determine what type of phrase to generate based on game state
    */
-  private determineCurrentPhraseType(gameState: GameStateForMusic): MusicalPhrase['type'] {
+  private determineCurrentPhraseType(
+    gameState: GameStateForMusic
+  ): MusicalPhrase["type"] {
     const healthRatio = gameState.playerHealth / gameState.playerMaxHealth;
-    
-    if (gameState.nearbyEnemyCount > 2) return 'chorus'; // High intensity
-    if (gameState.isInCombat) return 'verse'; // Medium intensity
-    if (healthRatio < 0.3) return 'bridge'; // Tension building
-    if (gameState.enemyCount === 0) return 'outro'; // Victory approaching
-    
-    return 'verse'; // Default exploration
+
+    if (gameState.nearbyEnemyCount > 2) return "chorus"; // High intensity
+    if (gameState.isInCombat) return "verse"; // Medium intensity
+    if (healthRatio < 0.3) return "bridge"; // Tension building
+    if (gameState.enemyCount === 0) return "outro"; // Victory approaching
+
+    return "verse"; // Default exploration
   }
 
   /**
@@ -2611,18 +2795,39 @@ export class AudioSystem {
     if (!this.audioContext) return null;
 
     const buffer = this.audioContext.createBuffer(
-      2, 
-      Math.ceil(phrase.duration * this.audioContext.sampleRate), 
+      2,
+      Math.ceil(phrase.duration * this.audioContext.sampleRate),
       this.audioContext.sampleRate
     );
-    
+
     const leftChannel = buffer.getChannelData(0);
     const rightChannel = buffer.getChannelData(1);
 
     // Generate phrase with proper repetition and breathing
-    this.generateSmoothMelody(leftChannel, rightChannel, phrase, scale, beatDuration, config, gameState);
-    this.generateSmoothBass(leftChannel, rightChannel, phrase, scale, beatDuration, config);
-    this.generateSmoothRhythm(leftChannel, rightChannel, phrase, beatDuration, config);
+    this.generateSmoothMelody(
+      leftChannel,
+      rightChannel,
+      phrase,
+      scale,
+      beatDuration,
+      config,
+      gameState
+    );
+    this.generateSmoothBass(
+      leftChannel,
+      rightChannel,
+      phrase,
+      scale,
+      beatDuration,
+      config
+    );
+    this.generateSmoothRhythm(
+      leftChannel,
+      rightChannel,
+      phrase,
+      beatDuration,
+      config
+    );
 
     return buffer;
   }
@@ -2664,8 +2869,6 @@ export class AudioSystem {
 
     return baseLength;
   }
-
-
 
   /**
    * Calculate adaptive BPM based on game state
@@ -2980,15 +3183,16 @@ export class AudioSystem {
     leftChannel: Float32Array,
     rightChannel: Float32Array,
     songStructure: Record<string, number>,
-    scale: any,
+    _scale: any,
     beatDuration: number,
     gameState: GameStateForMusic
   ): void {
-    if (!this.seededRandom || gameState.closestEnemyDistance > 10) return;
+    // Only generate dissonance when very close to enemies (< 2 units) and rarely
+    if (!this.seededRandom || gameState.closestEnemyDistance > 2) return;
 
     const dissonanceIntensity = Math.max(
       0,
-      (10 - gameState.closestEnemyDistance) / 10
+      (2 - gameState.closestEnemyDistance) / 2
     );
     let currentTime = 0;
 
@@ -2998,26 +3202,31 @@ export class AudioSystem {
       for (let measure = 0; measure < measures; measure++) {
         const measureStart = currentTime + measure * measureDuration;
 
-        // Generate unsettling tritone intervals
-        if (this.seededRandom!.next() < dissonanceIntensity * 0.3) {
+        // Much rarer tritone generation (only 5% chance when very close)
+        if (this.seededRandom!.next() < dissonanceIntensity * 0.05) {
           const tritoneTime =
             measureStart + this.seededRandom!.next() * measureDuration;
 
-          const tritoneBuffer = this.generateNote(
-            scale.As3 ?? 233.08, // Tritone
-            beatDuration * 2,
-            "sawtooth",
-            { attack: 0.1, decay: 0.5, sustain: 0.3, release: 0.5 },
-            dissonanceIntensity * 0.3,
-            { type: "bandpass", frequency: 500 }
+          // Use a gentler dissonance effect instead of harsh tritones
+          const scaleKey = this.currentSongConfig?.baseKey as keyof typeof SCALE_NOTE_ARRAYS || 'E_MINOR';
+          const harmonyNotes = SCALE_NOTE_ARRAYS[scaleKey]?.harmony || [82.41, 98.0, 110.0, 123.47, 130.81, 146.83];
+          const dissonantNote = harmonyNotes[harmonyNotes.length - 1]; // Use highest harmony note for subtle tension
+
+          const dissonanceBuffer = this.generateNote(
+            dissonantNote * 1.5, // Slight frequency shift for mild dissonance
+            beatDuration * 1,
+            "sine",
+            { attack: 0.2, decay: 0.4, sustain: 0.2, release: 0.4 },
+            dissonanceIntensity * 0.15, // Much quieter
+            { type: "lowpass", frequency: 800 } // Softer filter
           );
 
-          if (tritoneBuffer) {
-            // Alternate channels for unsettling stereo effect
+          if (dissonanceBuffer) {
+            // Subtle stereo effect
             if (measure % 2 === 0) {
-              this.mixAudioBuffer(leftChannel, tritoneBuffer, tritoneTime);
+              this.mixAudioBuffer(leftChannel, dissonanceBuffer, tritoneTime);
             } else {
-              this.mixAudioBuffer(rightChannel, tritoneBuffer, tritoneTime);
+              this.mixAudioBuffer(rightChannel, dissonanceBuffer, tritoneTime);
             }
           }
         }
@@ -3118,18 +3327,18 @@ export class AudioSystem {
 
     const notesPerBeat = 2; // Eighth notes
     const totalNotes = phrase.notes.length;
-    
+
     for (let i = 0; i < totalNotes; i++) {
       const noteFrequency = phrase.notes[i];
       if (noteFrequency === 0) continue; // Skip rests
-      
+
       const noteTime = (i / notesPerBeat) * beatDuration;
-      const noteDuration = beatDuration / notesPerBeat * 0.8; // Slight gap between notes
-      
+      const noteDuration = (beatDuration / notesPerBeat) * 0.8; // Slight gap between notes
+
       // Add slight frequency variation using Perlin noise for humanization
       const variation = this.perlinNoise.noise(this.musicTime + i * 0.02) * 5; // ±5Hz variation
       const finalFrequency = noteFrequency + variation;
-      
+
       // Generate note with envelope
       const noteBuffer = this.generateNote(
         finalFrequency,
@@ -3139,15 +3348,26 @@ export class AudioSystem {
         config.intensity * VOLUME_MULTIPLIERS.LEAD * 0.3,
         { type: "lowpass", frequency: 1200 + config.intensity * 800 }
       );
-      
+
       if (noteBuffer) {
         // Add stereo width using Perlin noise
-        const stereoPosition = this.perlinNoise.smoothValue(this.musicTime + i * 0.1) * 2 - 1; // -1 to 1
+        const stereoPosition =
+          this.perlinNoise.smoothValue(this.musicTime + i * 0.1) * 2 - 1; // -1 to 1
         const leftGain = stereoPosition < 0 ? 1 : 1 - Math.abs(stereoPosition);
         const rightGain = stereoPosition > 0 ? 1 : 1 - Math.abs(stereoPosition);
-        
-        this.mixAudioBufferWithGain(leftChannel, noteBuffer, noteTime, leftGain);
-        this.mixAudioBufferWithGain(rightChannel, noteBuffer, noteTime, rightGain);
+
+        this.mixAudioBufferWithGain(
+          leftChannel,
+          noteBuffer,
+          noteTime,
+          leftGain
+        );
+        this.mixAudioBufferWithGain(
+          rightChannel,
+          noteBuffer,
+          noteTime,
+          rightGain
+        );
       }
     }
   }
@@ -3159,34 +3379,39 @@ export class AudioSystem {
     leftChannel: Float32Array,
     rightChannel: Float32Array,
     phrase: MusicalPhrase,
-    scale: any,
+    _scale: any,
     beatDuration: number,
     config: ProceduralSongConfig
   ): void {
     if (!this.perlinNoise) return;
 
-    const bassNotes = [scale.E1, scale.G1, scale.A1, scale.B1].filter(note => note !== undefined);
-    const beatsInPhrase = phrase.notes.length / 2; // Assuming 2 notes per beat
+    // Use organized scale notes for harmonic accuracy
+    const scaleKey = this.currentSongConfig?.baseKey as keyof typeof SCALE_NOTE_ARRAYS || 'E_MINOR';
+    const bassNotes = SCALE_NOTE_ARRAYS[scaleKey]?.bass || [41.2, 49.0, 55.0, 61.74, 65.41, 73.42];
     
+    const beatsInPhrase = phrase.notes.length / 2; // Assuming 2 notes per beat
+
     for (let beat = 0; beat < beatsInPhrase; beat++) {
       // Play bass on strong beats (1 and 3 in 4/4 time)
       if (beat % 4 === 0 || beat % 4 === 2) {
         const beatTime = beat * beatDuration;
-        
-        // Choose bass note using Perlin noise for smooth progression
-        const noiseValue = this.perlinNoise.smoothValue(this.musicTime + beat * 0.25);
-        const bassNoteIndex = Math.floor(noiseValue * bassNotes.length);
+
+        // Choose bass note using limited movement for stability
+        const noiseValue = this.perlinNoise.smoothValue(
+          this.musicTime + beat * 0.25
+        );
+        const bassNoteIndex = Math.floor(noiseValue * Math.min(4, bassNotes.length)); // Limit to first 4 bass notes for stability
         const bassFrequency = bassNotes[bassNoteIndex];
-        
+
         const bassBuffer = this.generateNote(
           bassFrequency,
           beatDuration * 1.5, // Slightly longer than beat
           "triangle",
           { attack: 0.01, decay: 0.3, sustain: 0.5, release: 0.4 },
-          config.intensity * VOLUME_MULTIPLIERS.BASS * 0.5,
+          config.intensity * VOLUME_MULTIPLIERS.BASS * 0.3, // Reduced volume since we have base layer
           { type: "lowpass", frequency: 150 }
         );
-        
+
         if (bassBuffer) {
           this.mixAudioBuffer(leftChannel, bassBuffer, beatTime);
           this.mixAudioBuffer(rightChannel, bassBuffer, beatTime);
@@ -3208,14 +3433,20 @@ export class AudioSystem {
     if (!this.perlinNoise) return;
 
     const beatsInPhrase = phrase.notes.length / 2;
-    
+
     for (let beat = 0; beat < beatsInPhrase; beat++) {
       const beatTime = beat * beatDuration;
-      
+
       // Kick drum on beats 1 and 3, with some variation
-      if (beat % 4 === 0 || (beat % 4 === 2 && this.perlinNoise.smoothValue(this.musicTime + beat * 0.1) > 0.3)) {
-        const kickIntensity = 1.0 - (this.perlinNoise.smoothValue(this.musicTime + beat * 0.05) * 0.3);
-        
+      if (
+        beat % 4 === 0 ||
+        (beat % 4 === 2 &&
+          this.perlinNoise.smoothValue(this.musicTime + beat * 0.1) > 0.3)
+      ) {
+        const kickIntensity =
+          1.0 -
+          this.perlinNoise.smoothValue(this.musicTime + beat * 0.05) * 0.3;
+
         const kickBuffer = this.generateNote(
           60, // Low kick frequency
           beatDuration * 0.4,
@@ -3224,17 +3455,21 @@ export class AudioSystem {
           kickIntensity * config.intensity * VOLUME_MULTIPLIERS.KICK * 0.6,
           { type: "lowpass", frequency: 100 }
         );
-        
+
         if (kickBuffer) {
           this.mixAudioBuffer(leftChannel, kickBuffer, beatTime);
           this.mixAudioBuffer(rightChannel, kickBuffer, beatTime);
         }
       }
-      
+
       // Hi-hat pattern with Perlin noise variation
-      if (beat % 2 === 1) { // Offbeats
-        const hihatChance = this.perlinNoise.smoothValue(this.musicTime + beat * 0.15);
-        if (hihatChance > 0.4) { // 60% chance to play
+      if (beat % 2 === 1) {
+        // Offbeats
+        const hihatChance = this.perlinNoise.smoothValue(
+          this.musicTime + beat * 0.15
+        );
+        if (hihatChance > 0.4) {
+          // 60% chance to play
           const hihatBuffer = this.generateNote(
             8000 + this.perlinNoise.noise(this.musicTime + beat * 0.1) * 2000, // High frequency variation
             beatDuration * 0.1,
@@ -3243,7 +3478,7 @@ export class AudioSystem {
             config.intensity * 0.2,
             { type: "highpass", frequency: 5000 }
           );
-          
+
           if (hihatBuffer) {
             // Alternate stereo placement
             if (beat % 4 === 1) {
@@ -3263,6 +3498,16 @@ export class AudioSystem {
   public cleanup(): void {
     this.stopAmbientMusic();
 
+    // Stop base layer
+    if (this.baseLayerSource) {
+      try {
+        this.baseLayerSource.stop();
+      } catch (error) {
+        console.warn("Error stopping base layer:", error);
+      }
+      this.baseLayerSource = null;
+    }
+
     // Stop all active sounds
     this.activeSounds.forEach((source) => {
       try {
@@ -3276,6 +3521,8 @@ export class AudioSystem {
     // Don't close the global audio context as other instances might be using it
     this.audioContext = null;
     this.musicGainNode = null;
+    this.baseLayerGain = null;
+    this.melodyLayerGain = null;
     this.crossfadeManager = null;
     this.perlinNoise = null;
   }
